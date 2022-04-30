@@ -19,10 +19,12 @@ enum struct recordinfo_t
 char gS_Map[160];
 char gS_SelectedMap[MAXPLAYERS+1][160];
 ArrayList gA_RecordsInfo[TRACK_LIMIT];
+bool gB_CurrentMapFetching = false;
 
 // other map record
 ArrayList gA_TempRecordsInfo[MAXPLAYERS+1][TRACK_LIMIT];
 bool gB_OtherMap[MAXPLAYERS+1];
+bool gB_Fetching[MAXPLAYERS+1];
 Handle gH_FetchTimer[MAXPLAYERS+1];
 
 
@@ -34,6 +36,12 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_shm", Command_SurfHeaven_Mapinfo);
 	RegConsoleCmd("sm_shtop", Command_SurfHeaven_Top);
 	RegConsoleCmd("sm_shwr", Command_SurfHeaven_WR);
+}
+
+public void OnClientPutInServer(int client)
+{
+	gB_OtherMap[client] = false;
+	gB_Fetching[client] = false;
 }
 
 public void OnMapStart()
@@ -51,9 +59,12 @@ public void OnMapStart()
 
 void SurfHeaven_GetCurrentMapRecords()
 {
+	gB_CurrentMapFetching = true;
+
 	char sURL[512];
 	FormatURL(sURL, sizeof(sURL), HEAVEN_RECORDS_API, gS_Map);
 	HTTPRequest records = new HTTPRequest(sURL);
+	records.Timeout = 600;
 	records.Get(GetCurrentMapRecords_Callback);
 }
 
@@ -108,7 +119,9 @@ public void GetCurrentMapRecords_Callback(HTTPResponse response, any value, cons
 
 	SortRecords(gA_RecordsInfo);
 
-	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* 输入{green}!shm{default}, {green}!shwr{default}, {green}!shtop{default}以获取地图信息和记录");
+	gB_CurrentMapFetching = false;
+
+	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {gold}获取完毕!{default} 输入{green}!shm{default}, {green}!shwr{default}, {green}!shtop{default}以查询地图信息和记录");
 }
 
 public Action Command_SurfHeaven_Mapinfo(int client, int args)
@@ -184,18 +197,33 @@ public Action Command_SurfHeaven_Top(int client, int args)
 {
 	if(args == 0)
 	{
+		if(gB_CurrentMapFetching)
+		{
+			Shavit_PrintToChat(client, "当前地图的记录{lightred}仍在获取中{default}, 请耐心等待...");
+
+			return Plugin_Handled;
+		}
+
 		strcopy(gS_SelectedMap[client], sizeof(gS_SelectedMap[]), gS_Map);
 		OpenMapRecordsMenu(client, false);
 
 		return Plugin_Handled;
 	}
 
+	if(gB_Fetching[client])
+	{
+		Shavit_PrintToChat(client, "请等待{lightgreen}上一轮{default}的记录查询完毕...");
+
+		return Plugin_Handled;
+	}
+
 	GetCmdArgString(gS_SelectedMap[client], sizeof(gS_SelectedMap[]));
 	GetOtherMapRecords(client, gS_SelectedMap[client]);
+	gB_Fetching[client] = true;
 
 	Shavit_PrintToChat(client, "查询{lightgreen}其他地图{default}记录时会有{darkred}延迟{default}, 请稍后...");
 
-	gH_FetchTimer[client] = CreateTimer(30.0, Timer_FetchFailTips, GetClientSerial(client));
+	gH_FetchTimer[client] = CreateTimer(60.0, Timer_FetchFailTips, GetClientSerial(client));
 
 	return Plugin_Handled;
 }
@@ -204,12 +232,13 @@ public Action Timer_FetchFailTips(Handle timer, any data)
 {
 	int client = GetClientFromSerial(data);
 
-	Shavit_PrintToChat(client, "{lightred}30秒钟{default}过去了, "...
-		"如果{darkred}还没有{default}查出来结果, "...
+	Shavit_PrintToChat(client, "{lightred}60秒钟{default}过去了, "...
+		"你查询的地图{darkred}数据量过大{default}, "...
 		"请亲自去官网查询: {green}https://surfheaven.eu/map/%s{default}", 
 		gS_SelectedMap[client]);
 
 	gH_FetchTimer[client] = null;
+	gB_Fetching[client] = false;
 
 	return Plugin_Stop;
 }
@@ -219,6 +248,7 @@ void GetOtherMapRecords(int client, const char[] map)
 	char sURL[512];
 	FormatURL(sURL, sizeof(sURL), HEAVEN_RECORDS_API, map);
 	HTTPRequest records = new HTTPRequest(sURL);
+	records.Timeout = 60;
 	records.Get(GetOtherMapRecords_Callback, GetClientSerial(client));
 }
 
@@ -229,13 +259,14 @@ public void GetOtherMapRecords_Callback(HTTPResponse response, any value, const 
 	if(response.Status != HTTPStatus_OK)
 	{
 		Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* 获取地图信息失败! 原因: %s", error);
+		gB_Fetching[client] = false;
 		return;
 	}
 
 	response.Data.ToFile("otherrecords.json");
 
 	delete gH_FetchTimer[client];
-	Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* 记录信息获取成功");
+	Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* 记录信息{green}获取成功{default}");
 
 	JSONArray records = JSONArray.FromFile("otherrecords.json");
 
@@ -279,6 +310,8 @@ public void GetOtherMapRecords_Callback(HTTPResponse response, any value, const 
 	delete records;
 
 	SortRecords(gA_TempRecordsInfo[client]);
+
+	gB_Fetching[client] = false;
 
 	OpenMapRecordsMenu(client, true);
 }
@@ -341,7 +374,7 @@ void OpenMainRecordsMenu(int client)
 
 	if(menu.ItemCount == 0)
 	{
-		menu.AddItem("", "惊了, SH无记录...", ITEMDRAW_DISABLED);
+		menu.AddItem("", "惊了, SH无记录... \n(有没有一种可能, SH没有这个地图)", ITEMDRAW_DISABLED);
 	}
 
 	menu.ExitBackButton = true;
@@ -392,7 +425,7 @@ void OpenBonusRecordsMenu(int client)
 
 	if(menu.ItemCount == 0)
 	{
-		menu.AddItem("", "没有奖励关记录, 或许这个图压根就没有奖励关?", ITEMDRAW_DISABLED);
+		menu.AddItem("", "没有奖励关记录, 或许这个图压根就没有奖励关? \n(有没有一种可能, SH没有这个地图)", ITEMDRAW_DISABLED);
 	}
 
 	menu.ExitBackButton = true;
@@ -479,6 +512,13 @@ public Action Command_SurfHeaven_WR(int client, int args)
 		}
 	}
 
+	if(gB_CurrentMapFetching)
+	{
+		Shavit_PrintToChat(client, "当前地图的记录{lightred}仍在获取中{default}, 请耐心等待...");
+
+		return Plugin_Handled;
+	}
+
 	if(gA_RecordsInfo[Track_Main].Length == 0)
 	{
 		Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {lightred}找不到该地图的记录!{default}");
@@ -492,7 +532,7 @@ public Action Command_SurfHeaven_WR(int client, int args)
 	char sWR[32];
 	FormatHUDSeconds(cache.time, sWR, sizeof(sWR));
 
-	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {lightred}当前地图{default} WR: {green}%s{default}, 保持者: {green}%s{default}, 日期: {green}%s{default}, 尝试次数: {green}%d{default}", 
+	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {yellow}当前地图{default}WR: {green}%s{default}, 保持者: {green}%s{default}, 日期: {green}%s{default}, 尝试次数: {green}%d{default}", 
 		sWR, cache.sName, cache.sDate, cache.completions);
 
 	return Plugin_Handled;
