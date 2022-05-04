@@ -322,7 +322,7 @@ void OpenMapRecordsMenu(int client, bool othermap)
 
 	Menu menu = new Menu(MapRecordsMenu_Handler);
 
-	menu.SetTitle("SH记录查询: %s\n  ", gS_SelectedMap[client]);
+	menu.SetTitle("SH记录查询: %s\n(以SH服务器区域为准)\n  ", gS_SelectedMap[client]);
 
 	menu.AddItem("main", "主线记录");
 	menu.AddItem("bonus", "奖励关记录");
@@ -367,8 +367,11 @@ void OpenMainRecordsMenu(int client)
 		recordinfo_t cache;
 		arr.GetArray(i, cache, sizeof(recordinfo_t));
 
+		char sTime[32];
+		FormatHUDSecondsEx(cache.time, sTime, sizeof(sTime));
+
 		char sDisplay[128]
-		FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s - %.3f (%d 尝试次数)", cache.rank, cache.sName, cache.time, cache.completions);
+		FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s - %s (%d 尝试次数)", cache.rank, cache.sName, sTime, cache.completions);
 		menu.AddItem("", sDisplay, ITEMDRAW_DISABLED);
 	}
 
@@ -471,8 +474,11 @@ void OpenBonusRecordsMenu_Post(int client, int bonus)
 		recordinfo_t cache;
 		arr.GetArray(j, cache, sizeof(recordinfo_t));
 
+		char sTime[32];
+		FormatHUDSecondsEx(cache.time, sTime, sizeof(sTime));
+
 		char sDisplay[128];
-		FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s - %.3f (%d 尝试次数)", cache.rank, cache.sName, cache.time, cache.completions);
+		FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s - %s (%d 尝试次数)", cache.rank, cache.sName, sTime, cache.completions);
 		menu.AddItem("", sDisplay, ITEMDRAW_DISABLED);
 	}
 
@@ -530,7 +536,7 @@ public Action Command_SurfHeaven_WR(int client, int args)
 	gA_RecordsInfo[Track_Main].GetArray(0, cache, sizeof(recordinfo_t));
 
 	char sWR[32];
-	FormatHUDSeconds(cache.time, sWR, sizeof(sWR));
+	FormatHUDSecondsEx(cache.time, sWR, sizeof(sWR));
 
 	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {yellow}当前地图{default}WR: {green}%s{default}, 保持者: {green}%s{default}, 日期: {green}%s{default}, 尝试次数: {green}%d{default}", 
 		sWR, cache.sName, cache.sDate, cache.completions);
@@ -576,5 +582,45 @@ static void InitTempRecords(int client)
 	{
 		delete gA_TempRecordsInfo[client][i];
 		gA_TempRecordsInfo[client][i] = new ArrayList(sizeof(recordinfo_t));
+	}
+}
+
+static void FormatHUDSecondsEx(float time, char[] newtime, int newtimesize)
+{
+	float fTempTime = time;
+
+	if(fTempTime < 0.0)
+	{
+		fTempTime = -fTempTime;
+	}
+	
+	int iRounded = RoundToFloor(fTempTime);
+	float fSeconds = (iRounded % 60) + fTempTime - iRounded;
+
+	char sSeconds[8];
+	FormatEx(sSeconds, 8, "%.03f", fSeconds);
+
+	if(fTempTime < 60.0)
+	{
+		strcopy(newtime, newtimesize, sSeconds);
+		FormatEx(newtime, newtimesize, "%s00:%s%s", (time < 0.0) ? "-":"", (fSeconds < 10) ? "0":"", sSeconds);
+	}
+
+	else
+	{
+		int iMinutes = (iRounded / 60);
+
+		if(fTempTime < 3600.0)
+		{
+			FormatEx(newtime, newtimesize, "%s%s%d:%s%s", (time < 0.0)? "-":"", (fTempTime < 600)? "0":"", iMinutes, (fSeconds < 10)? "0":"", sSeconds);
+		}
+
+		else
+		{
+			iMinutes %= 60;
+			int iHours = (iRounded / 3600);
+
+			FormatEx(newtime, newtimesize, "%s%d:%s%d:%s%s", (time < 0.0)? "-":"", iHours, (iMinutes < 10)? "0":"", iMinutes, (fSeconds < 10)? "0":"", sSeconds);
+		}
 	}
 }
