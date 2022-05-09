@@ -4,8 +4,10 @@
 
 #define HEAVEN_MAPINFO_API "https://surfheaven.eu/api/mapinfo/"
 #define HEAVEN_RECORDS_API "https://surfheaven.eu/api/records/"
+#define HEAVEN_WRCPS_API   "https://surfheaven.eu/api/stages/"
 
 #define MAX_RECORDS 1000
+#define STAGES_LIMIT 70 // due to surf_classics3
 
 enum struct recordinfo_t
 {
@@ -19,10 +21,12 @@ enum struct recordinfo_t
 char gS_Map[160];
 char gS_SelectedMap[MAXPLAYERS+1][160];
 ArrayList gA_RecordsInfo[TRACK_LIMIT];
+ArrayList gA_StageRecordsInfo[STAGES_LIMIT];
 bool gB_CurrentMapFetching = false;
 
 // other map record
 ArrayList gA_TempRecordsInfo[MAXPLAYERS+1][TRACK_LIMIT];
+ArrayList gA_TempStageRecordsInfo[MAXPLAYERS+1][STAGES_LIMIT];
 bool gB_OtherMap[MAXPLAYERS+1];
 bool gB_Fetching[MAXPLAYERS+1];
 Handle gH_FetchTimer[MAXPLAYERS+1];
@@ -36,6 +40,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_shm", Command_SurfHeaven_Mapinfo);
 	RegConsoleCmd("sm_shtop", Command_SurfHeaven_Top);
 	RegConsoleCmd("sm_shwr", Command_SurfHeaven_WR);
+	RegConsoleCmd("sm_shwrcp", Command_SurfHeaven_WRCP);
 }
 
 public void OnClientPutInServer(int client)
@@ -52,6 +57,12 @@ public void OnMapStart()
 	{
 		delete gA_RecordsInfo[i];
 		gA_RecordsInfo[i] = new ArrayList(sizeof(recordinfo_t));
+	}
+
+	for(int i = 0; i < STAGES_LIMIT; i++)
+	{
+		delete gA_StageRecordsInfo[i];
+		gA_StageRecordsInfo[i] = new ArrayList(sizeof(recordinfo_t));
 	}
 
 	SurfHeaven_GetCurrentMapRecords();
@@ -86,29 +97,9 @@ public void GetCurrentMapRecords_Callback(HTTPResponse response, any value, cons
 
 		recordinfo_t cache;
 
-		info.GetString("name", cache.sName, sizeof(recordinfo_t::sName));
+		int track;
 
-		float time = info.GetFloat("time");
-		if(time == 0.0) /* SH在比如57.000这种时间, 只存储57, 不保留小数, 你妈的, json还读取出错, 离谱 */
-		{
-			time = float(info.GetInt("time"));
-		}
-
-		cache.time = time;
-
-		cache.rank = info.GetInt("rank");
-
-		int track = info.GetInt("track");
-
-		char sDate[128];
-		info.GetString("date", sDate, sizeof(sDate));
-		//"2021-04-09T14:40:51.000Z",
-		sDate[FindCharInString(sDate, 'T')] = ' ';
-		sDate[FindCharInString(sDate, '.', true)] = '\0';
-
-		strcopy(cache.sDate, sizeof(recordinfo_t::sDate), sDate);
-
-		cache.completions = info.GetInt("finishcount");
+		WriteRecordsToCache(info, cache, track);
 
 		gA_RecordsInfo[track].PushArray(cache);
 
@@ -117,11 +108,62 @@ public void GetCurrentMapRecords_Callback(HTTPResponse response, any value, cons
 
 	delete records;
 
-	SortRecords(gA_RecordsInfo);
+	SortRecords(gA_RecordsInfo, TRACK_LIMIT);
 
+	SurfHeaven_GetCurrentMapWRCPs();
+}
+
+void SurfHeaven_GetCurrentMapWRCPs()
+{
+	char sURL[512];
+	FormatURL(sURL, sizeof(sURL), HEAVEN_WRCPS_API, gS_Map);
+	HTTPRequest records = new HTTPRequest(sURL);
+	records.Timeout = 120; // SH自己限定了大小，关卡记录远远小于主线记录，即便是超大数据量的surf_beginner
+	records.Get(GetCurrentMapWRCPs_Callback);
+}
+
+public void GetCurrentMapWRCPs_Callback(HTTPResponse response, any value, const char[] error)
+{
+	if(response.Status != HTTPStatus_OK)
+	{
+		LogError("*SurfHeaven* 获取地图信息失败! 原因: %s", error);
+
+		DoneFetchRecords();
+
+		return;
+	}
+
+	response.Data.ToFile("curwrcps.json");
+
+	JSONArray records = JSONArray.FromFile("curwrcps.json");
+
+	for(int i = 0; i < records.Length; i++)
+	{
+		JSONObject info = view_as<JSONObject>(records.Get(i));
+
+		recordinfo_t cache;
+
+		int stage;
+
+		WriteWRCPsToCache(info, cache, stage);
+
+		gA_StageRecordsInfo[stage].PushArray(cache);
+
+		delete info;
+	}
+
+	delete records;
+
+	SortRecords(gA_StageRecordsInfo, STAGES_LIMIT);
+
+	DoneFetchRecords();
+}
+
+void DoneFetchRecords()
+{
 	gB_CurrentMapFetching = false;
 
-	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {gold}获取完毕!{default} 输入{green}!shm{default}, {green}!shwr{default}, {green}!shtop{default}以查询地图信息和记录");
+	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {gold}获取完毕!{default} 输入{green}!shm{default}, {green}!shwr{default}, {green}!shwrcp{default}, {green}!shtop{default}以查询地图信息和记录");
 }
 
 public Action Command_SurfHeaven_Mapinfo(int client, int args)
@@ -249,12 +291,25 @@ void GetOtherMapRecords(int client, const char[] map)
 	FormatURL(sURL, sizeof(sURL), HEAVEN_RECORDS_API, map);
 	HTTPRequest records = new HTTPRequest(sURL);
 	records.Timeout = 60;
-	records.Get(GetOtherMapRecords_Callback, GetClientSerial(client));
+
+	DataPack dp = new DataPack();
+	dp.WriteCell(GetClientSerial(client));
+	dp.WriteString(map);
+
+	records.Get(GetOtherMapRecords_Callback, dp);
 }
 
-public void GetOtherMapRecords_Callback(HTTPResponse response, any value, const char[] error)
+public void GetOtherMapRecords_Callback(HTTPResponse response, DataPack dp, const char[] error)
 {
-	int client = GetClientFromSerial(value);
+	dp.Reset();
+	
+	int client = GetClientFromSerial(dp.ReadCell());
+
+	char sMap[160];
+	dp.ReadString(sMap, sizeof(sMap));
+
+	delete dp;
+
 
 	if(response.Status != HTTPStatus_OK)
 	{
@@ -266,55 +321,100 @@ public void GetOtherMapRecords_Callback(HTTPResponse response, any value, const 
 	response.Data.ToFile("otherrecords.json");
 
 	delete gH_FetchTimer[client];
-	Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* 记录信息{green}获取成功{default}");
+	InitTempRecords(client);
 
 	JSONArray records = JSONArray.FromFile("otherrecords.json");
 
-	InitTempRecords(client);
-
-	for(int i = 0; i < records.Length; i++)
+	if(records.Length > 0)
 	{
-		JSONObject info = view_as<JSONObject>(records.Get(i));
+		Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* | 主线和奖励记录信息{green}获取成功{default}");
 
-		recordinfo_t cache;
-
-		info.GetString("name", cache.sName, sizeof(recordinfo_t::sName));
-
-		float time = info.GetFloat("time");
-		if(time == 0.0) /* SH在比如57.000这种时间, 只存储57, 不保留小数, 你妈的, json还读取出错, 离谱 */
+		for(int i = 0; i < records.Length; i++)
 		{
-			time = float(info.GetInt("time"));
+			JSONObject info = view_as<JSONObject>(records.Get(i));
+
+			recordinfo_t cache;
+
+			int track;
+
+			WriteRecordsToCache(info, cache, track);
+
+			gA_TempRecordsInfo[client][track].PushArray(cache);
+
+			delete info;
 		}
 
-		cache.time = time;
-
-		cache.rank = info.GetInt("rank");
-
-		int track = info.GetInt("track");
-
-		char sDate[128];
-		info.GetString("date", sDate, sizeof(sDate));
-		//"2021-04-09T14:40:51.000Z",
-		sDate[FindCharInString(sDate, 'T')] = ' ';
-		sDate[FindCharInString(sDate, '.', true)] = '\0';
-
-		strcopy(cache.sDate, sizeof(recordinfo_t::sDate), sDate);
-
-		cache.completions = info.GetInt("finishcount");
-
-		gA_TempRecordsInfo[client][track].PushArray(cache);
-
-		delete info;
+		SortRecords(gA_TempRecordsInfo[client], TRACK_LIMIT);
+	}
+	else
+	{
+		Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* | {lightred}没有主线和奖励记录...{default}");
 	}
 
 	delete records;
 
-	SortRecords(gA_TempRecordsInfo[client]);
+	GetOtherMapWRCPs(client, sMap);
+}
+
+void GetOtherMapWRCPs(int client, const char[] map)
+{
+	char sURL[512];
+	FormatURL(sURL, sizeof(sURL), HEAVEN_WRCPS_API, map);
+	HTTPRequest records = new HTTPRequest(sURL);
+	records.Get(GetOtherMapWRCPs_Callback, GetClientSerial(client));
+}
+
+public void GetOtherMapWRCPs_Callback(HTTPResponse response, any value, const char[] error)
+{
+	int client = GetClientFromSerial(value);
+
+	if(response.Status != HTTPStatus_OK)
+	{
+		Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* 获取地图WRCP信息失败! 原因: %s", error);
+		gB_Fetching[client] = false;
+		return;
+	}
+
+	response.Data.ToFile("otherwrcps.json");
+
+	JSONArray records = JSONArray.FromFile("otherwrcps.json");
+
+	if(records.Length > 0)
+	{
+		Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* | 关卡记录信息{green}获取成功{default}");
+
+		for(int i = 0; i < records.Length; i++)
+		{
+			JSONObject info = view_as<JSONObject>(records.Get(i));
+
+			recordinfo_t cache;
+
+			int stage;
+
+			WriteWRCPsToCache(info, cache, stage);
+
+			gA_TempStageRecordsInfo[client][stage].PushArray(cache);
+
+			delete info;
+		}
+
+		SortRecords(gA_TempStageRecordsInfo[client], STAGES_LIMIT);
+	}
+	else
+	{
+		Shavit_PrintToChat(client, "*{darkred}SurfHeaven{default}* | {lightred}没有关卡记录...{default}");
+	}
+
+	delete records;
 
 	gB_Fetching[client] = false;
 
 	OpenMapRecordsMenu(client, true);
 }
+
+
+
+/* menu */
 
 void OpenMapRecordsMenu(int client, bool othermap)
 {
@@ -326,6 +426,7 @@ void OpenMapRecordsMenu(int client, bool othermap)
 
 	menu.AddItem("main", "主线记录");
 	menu.AddItem("bonus", "奖励关记录");
+	menu.AddItem("stage", "关卡记录");
 
 	menu.Display(client, MENU_TIME_FOREVER);
 }
@@ -341,9 +442,13 @@ public int MapRecordsMenu_Handler(Menu menu, MenuAction action, int param1, int 
 		{
 			OpenMainRecordsMenu(param1);
 		}
-		else
+		else if(StrEqual(sInfo, "bonus"))
 		{
 			OpenBonusRecordsMenu(param1);
+		}
+		else //if(StrEqual(sInfo, "stage"))
+		{
+			OpenStageRecordsMenu(param1);
 		}
 	}
 	else if(action == MenuAction_End)
@@ -503,6 +608,114 @@ public int BonusRecordsMenu_Handler2(Menu menu, MenuAction action, int param1, i
 	return 0;
 }
 
+
+
+/* stage */
+
+void OpenStageRecordsMenu(int client)
+{
+	Menu menu = new Menu(StageRecordsMenu_Handler);
+
+	menu.SetTitle("请选择关卡: \n(只显示有记录的奖励)\n  ");
+
+	ArrayList arr[STAGES_LIMIT];
+	arr = gB_OtherMap[client] ? gA_TempStageRecordsInfo[client] : gA_StageRecordsInfo;
+
+	for(int i = 1; i < STAGES_LIMIT; i++)
+	{
+		if(arr[i].Length == 0) // this stage has no records found.
+		{
+			continue;
+		}
+
+		char sInfo[4];
+		IntToString(i, sInfo, sizeof(sInfo));
+
+		char sStage[16];
+		FormatEx(sStage, sizeof(sStage), "关卡 %d", i);
+
+		menu.AddItem(sInfo, sStage);
+	}
+
+	if(menu.ItemCount == 0)
+	{
+		menu.AddItem("", "没有关卡记录, 或许这个图是竞速图? \n(有没有一种可能, SH没有这个地图)", ITEMDRAW_DISABLED);
+	}
+
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int StageRecordsMenu_Handler(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Select)
+	{
+		char sInfo[4];
+		menu.GetItem(param2, sInfo, sizeof(sInfo));
+
+		OpenStageRecordsMenu_Post(param1, StringToInt(sInfo));
+	}
+	else if(action == MenuAction_Cancel)
+	{
+		if(param2 == MenuCancel_ExitBack)
+		{
+			OpenMapRecordsMenu(param1, gB_OtherMap[param1]);
+		}
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+
+	return 0;
+}
+
+void OpenStageRecordsMenu_Post(int client, int stage)
+{
+	Menu menu = new Menu(StageRecordsMenu_Handler2);
+
+	menu.SetTitle("记录 %s: [关卡 %d] \n(只显示前1000) \n  ", gS_SelectedMap[client], stage);
+
+	ArrayList arr = gB_OtherMap[client] ? gA_TempStageRecordsInfo[client][stage] : gA_StageRecordsInfo[stage];
+
+	for(int j = 0; j < arr.Length; j++)
+	{
+		recordinfo_t cache;
+		arr.GetArray(j, cache, sizeof(recordinfo_t));
+
+		char sTime[32];
+		FormatHUDSecondsEx(cache.time, sTime, sizeof(sTime));
+
+		char sDisplay[128];
+		FormatEx(sDisplay, sizeof(sDisplay), "#%d - %s - %s", cache.rank, cache.sName, sTime);
+		menu.AddItem("", sDisplay, ITEMDRAW_DISABLED);
+	}
+
+	menu.ExitBackButton = true;
+	menu.Display(client, MENU_TIME_FOREVER);
+}
+
+public int StageRecordsMenu_Handler2(Menu menu, MenuAction action, int param1, int param2)
+{
+	if(action == MenuAction_Cancel)
+	{
+		if(param2 == MenuCancel_ExitBack)
+		{
+			OpenStageRecordsMenu(param1);
+		}
+	}
+	else if(action == MenuAction_End)
+	{
+		delete menu;
+	}
+
+	return 0;
+}
+
+
+
+/* commands */
+
 public Action Command_SurfHeaven_WR(int client, int args)
 {
 	if(args == 1)
@@ -538,8 +751,54 @@ public Action Command_SurfHeaven_WR(int client, int args)
 	char sWR[32];
 	FormatHUDSecondsEx(cache.time, sWR, sizeof(sWR));
 
-	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {yellow}当前地图{default}WR: {green}%s{default}, 保持者: {green}%s{default}, 日期: {green}%s{default}, 尝试次数: {green}%d{default}", 
+	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {yellow}当前地图{default} | WR: {green}%s{default}, 保持者: {green}%s{default}, 日期: {green}%s{default}, 尝试次数: {green}%d{default}", 
 		sWR, cache.sName, cache.sDate, cache.completions);
+
+	return Plugin_Handled;
+}
+
+public Action Command_SurfHeaven_WRCP(int client, int args)
+{
+	int stage = 1;
+
+	if(args > 0)
+	{
+		char sArg[8];
+		GetCmdArg(1, sArg, sizeof(sArg));
+		ReplaceString(sArg, sizeof(sArg), "#", " ");
+
+		stage = StringToInt(sArg);
+
+		if(stage < 1)
+		{
+			Shavit_PrintToChat(client, "[关卡 %d] 不存在!", stage);
+
+			return Plugin_Handled;
+		}
+	}
+
+	if(gB_CurrentMapFetching)
+	{
+		Shavit_PrintToChat(client, "当前地图的关卡记录{lightred}仍在获取中{default}, 请耐心等待...");
+
+		return Plugin_Handled;
+	}
+
+	if(gA_StageRecordsInfo[stage].Length == 0)
+	{
+		Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {lightred}找不到 {gold}[关卡 %d]{lightred} 的记录!{default}", stage);
+
+		return Plugin_Handled;
+	}
+
+	recordinfo_t cache;
+	gA_StageRecordsInfo[stage].GetArray(0, cache, sizeof(recordinfo_t));
+
+	char sWR[32];
+	FormatHUDSecondsEx(cache.time, sWR, sizeof(sWR));
+
+	Shavit_PrintToChatAll("*{darkred}SurfHeaven{default}* | {yellow}当前地图{default} | {gold}[关卡 %d]{default} WRCP: {green}%s{default}, 保持者: {green}%s{default}, 日期: {green}%s{default}", 
+		stage, sWR, cache.sName, cache.sDate);
 
 	return Plugin_Handled;
 }
@@ -553,9 +812,9 @@ stock void FormatURL(char[] output, int maxlen, const char[] api, const char[] p
 	FormatEx(output, maxlen, "%s%s", api, param);
 }
 
-stock void SortRecords(ArrayList[] arr)
+stock void SortRecords(ArrayList[] arr, int len)
 {
-	for(int i = 0; i < TRACK_LIMIT; i++)
+	for(int i = 0; i < len; i++)
 	{
 		arr[i].SortCustom(SortRecordByTimeASC);
 
@@ -582,6 +841,12 @@ static void InitTempRecords(int client)
 	{
 		delete gA_TempRecordsInfo[client][i];
 		gA_TempRecordsInfo[client][i] = new ArrayList(sizeof(recordinfo_t));
+	}
+
+	for(int i = 0; i < STAGES_LIMIT; i++)
+	{
+		delete gA_TempStageRecordsInfo[client][i];
+		gA_TempStageRecordsInfo[client][i] = new ArrayList(sizeof(recordinfo_t));
 	}
 }
 
@@ -623,4 +888,56 @@ static void FormatHUDSecondsEx(float time, char[] newtime, int newtimesize)
 			FormatEx(newtime, newtimesize, "%s%d:%s%d:%s%s", (time < 0.0)? "-":"", iHours, (iMinutes < 10)? "0":"", iMinutes, (fSeconds < 10)? "0":"", sSeconds);
 		}
 	}
+}
+
+static void WriteRecordsToCache(JSONObject json, recordinfo_t cache, int& track)
+{
+	json.GetString("name", cache.sName, sizeof(recordinfo_t::sName));
+
+	float time = json.GetFloat("time");
+	if(time == 0.0) /* SH在比如57.000这种时间, 只存储57, 不保留小数, 你妈的, json还读取出错, 离谱 */
+	{
+		time = float(json.GetInt("time"));
+	}
+
+	cache.time = time;
+
+	cache.rank = json.GetInt("rank");
+
+	track = json.GetInt("track");
+
+	char sDate[128];
+	json.GetString("date", sDate, sizeof(sDate));
+	//"2021-04-09T14:40:51.000Z",
+	sDate[FindCharInString(sDate, 'T')] = ' ';
+	sDate[FindCharInString(sDate, '.', true)] = '\0';
+
+	strcopy(cache.sDate, sizeof(recordinfo_t::sDate), sDate);
+
+	cache.completions = json.GetInt("finishcount");
+}
+
+static void WriteWRCPsToCache(JSONObject json, recordinfo_t cache, int& stage)
+{
+	json.GetString("name", cache.sName, sizeof(recordinfo_t::sName));
+
+	float time = json.GetFloat("time");
+	if(time == 0.0) /* SH在比如57.000这种时间, 只存储57, 不保留小数, 你妈的, json还读取出错, 离谱 */
+	{
+		time = float(json.GetInt("time"));
+	}
+
+	cache.time = time;
+
+	cache.rank = json.GetInt("rank");
+
+	stage = json.GetInt("stage");
+
+	char sDate[128];
+	json.GetString("date", sDate, sizeof(sDate));
+	//"2021-04-09T14:40:51.000Z",
+	sDate[FindCharInString(sDate, 'T')] = ' ';
+	sDate[FindCharInString(sDate, '.', true)] = '\0';
+
+	strcopy(cache.sDate, sizeof(recordinfo_t::sDate), sDate);
 }
