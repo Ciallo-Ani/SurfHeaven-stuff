@@ -87,9 +87,7 @@ public void GetCurrentMapRecords_Callback(HTTPResponse response, any value, cons
 		return;
 	}
 
-	response.Data.ToFile("currecords.json");
-
-	JSONArray records = JSONArray.FromFile("currecords.json");
+	JSONArray records = view_as<JSONArray>(response.Data);
 
 	for(int i = 0; i < records.Length; i++)
 	{
@@ -133,9 +131,7 @@ public void GetCurrentMapWRCPs_Callback(HTTPResponse response, any value, const 
 		return;
 	}
 
-	response.Data.ToFile("curwrcps.json");
-
-	JSONArray records = JSONArray.FromFile("curwrcps.json");
+	JSONArray records = view_as<JSONArray>(response.Data);
 
 	for(int i = 0; i < records.Length; i++)
 	{
@@ -318,12 +314,10 @@ public void GetOtherMapRecords_Callback(HTTPResponse response, DataPack dp, cons
 		return;
 	}
 
-	response.Data.ToFile("otherrecords.json");
-
 	delete gH_FetchTimer[client];
 	InitTempRecords(client);
 
-	JSONArray records = JSONArray.FromFile("otherrecords.json");
+	JSONArray records = view_as<JSONArray>(response.Data);
 
 	if(records.Length > 0)
 	{
@@ -375,9 +369,7 @@ public void GetOtherMapWRCPs_Callback(HTTPResponse response, any value, const ch
 		return;
 	}
 
-	response.Data.ToFile("otherwrcps.json");
-
-	JSONArray records = JSONArray.FromFile("otherwrcps.json");
+	JSONArray records = view_as<JSONArray>(response.Data);
 
 	if(records.Length > 0)
 	{
